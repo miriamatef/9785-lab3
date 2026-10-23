@@ -387,9 +387,47 @@ void Command::print()
 void Command::execute()
 {
     print();
-    /*
-        Write your code here
-    */
+
+    int defaultInput = dup(STDIN_FILENO);
+    int defaultOutput = dup(STDOUT_FILENO);
+    int defaultError = dup(STDERR_FILENO);
+
+    if (defaultInput <0 || defaultOutput <0 || defaultError <0)
+    {
+        perror("Error: dup failed");
+        clear();
+        return;
+    }
+
+    pid_t pid = fork();
+    if (pid < 0)
+    {
+        std::cerr << "Error: fork failed\n";
+        clear();
+        prompt();
+        return;
+    }
+    else if (pid == 0) // Child process
+    {
+        execvp(_simpleCommands[0]->_arguments[0], _simpleCommands[0]->_arguments);
+        perror("Error: execvp failed");
+        exit(EXIT_FAILURE);
+    }
+    else // Parent process
+    {
+        if (!_background)
+        {
+            waitpid(pid, NULL, 0);
+        }
+    }
+
+    dup2(defaultInput, STDIN_FILENO);
+    dup2(defaultOutput, STDOUT_FILENO);
+    dup2(defaultError, STDERR_FILENO);
+
+    close(defaultInput);
+    close(defaultOutput);
+    close(defaultError);
 
     clear();
     prompt();
