@@ -102,6 +102,7 @@ void parse(std::vector<Token> &tokens)
             {
                 std::cerr << "Error: multiple output redirections\n";
                 delete currentSimpleCommand;
+                free(currentCommand._outFile);
                 currentCommand.clear();
                 return;
             }
@@ -132,10 +133,11 @@ void parse(std::vector<Token> &tokens)
                 currentCommand.clear();
                 return;
             }
-            if (currentCommand._numberOfAvailableSimpleCommands>0)
+            if (currentCommand._numberOfSimpleCommands>0)
             {
                 std::cerr << "Error: input redirection can only be specified for the first command\n";
                 delete currentSimpleCommand;
+                free(currentCommand._inputFile);
                 currentCommand.clear();
                 return;
             }
@@ -155,6 +157,7 @@ void parse(std::vector<Token> &tokens)
             {
                 std::cerr << "Error: missing redirection filename\n";
                 delete currentSimpleCommand;
+                free(currentCommand._errFile);
                 currentCommand.clear();
                 return;
             }
@@ -162,6 +165,7 @@ void parse(std::vector<Token> &tokens)
             {
                 std::cerr << "Error: multiple error redirections\n";
                 delete currentSimpleCommand;
+                free(currentCommand._errFile);
                 currentCommand.clear();
                 return;
             }
@@ -181,19 +185,24 @@ void parse(std::vector<Token> &tokens)
             {
                 std::cerr << "Error: missing redirection filename\n";
                 delete currentSimpleCommand;
+                free(currentCommand._errFile);
+                free(currentCommand._outFile);
                 currentCommand.clear();
                 return;
             }
             if (currentCommand._out_error == 1)
             {
                 std::cerr << "Error: multiple error redirections\n";
-                delete currentSimpleCommand;
+                free(currentSimpleCommand);
+                free(currentCommand._errFile);
+                free(currentCommand._outFile);
                 currentCommand.clear();
                 return;
             }
             currentCommand._out_error = 1;
             currentCommand._append =1;
             currentCommand._errFile = strdup(tokens[++i].value.c_str());
+            currentCommand._outFile = strdup(tokens[i].value.c_str());
             break;
 
         case TOKEN_PIPE:
@@ -209,6 +218,9 @@ void parse(std::vector<Token> &tokens)
             {
                 std::cerr << "Error: missing command after pipe\n";
                 delete currentSimpleCommand;
+                free(currentCommand._outFile);
+                free(currentCommand._inputFile);
+                free(currentCommand._errFile);
                 currentCommand.clear();
                 return;
             }
@@ -216,6 +228,9 @@ void parse(std::vector<Token> &tokens)
             {
                 std::cerr << "Error: missing command before pipe\n";
                 delete currentSimpleCommand;
+                free(currentCommand._outFile);
+                free(currentCommand._inputFile);
+                free(currentCommand._errFile);
                 currentCommand.clear();
                 return;
             }
@@ -228,6 +243,9 @@ void parse(std::vector<Token> &tokens)
             {
                 std::cerr << "Error: background operator '&' must be at the end of the command\n";
                 delete currentSimpleCommand;
+                free(currentCommand._outFile);
+                free(currentCommand._inputFile);
+                free(currentCommand._errFile);
                 currentCommand.clear();
                 return;
             }
@@ -235,6 +253,9 @@ void parse(std::vector<Token> &tokens)
             {
                 std::cerr << "Error: missing command before background operator '&'\n";
                 delete currentSimpleCommand;
+                free(currentCommand._outFile);
+                free(currentCommand._inputFile);
+                free(currentCommand._errFile);
                 currentCommand.clear();
                 return;
             }
@@ -244,6 +265,9 @@ void parse(std::vector<Token> &tokens)
         default:
             std::cerr << "Error: unexpected token type\n";
             delete currentSimpleCommand;
+            free(currentCommand._outFile);
+            free(currentCommand._inputFile);
+            free(currentCommand._errFile);
             currentCommand.clear();
             return;
         }
@@ -257,6 +281,7 @@ void parse(std::vector<Token> &tokens)
     else
     {
         delete currentSimpleCommand;
+        free(currentCommand);
         currentSimpleCommand = nullptr; // Prevent double deletion
     }
 
@@ -394,165 +419,267 @@ void Command::execute()
         return;
     }
 
-    if(strcmp(_simpleCommands[0]->_arguments[0], "exit") == 0)
+    char **simpleArgs = _simpleCommands[0]->_arguments;
+    if (simpleArgs ==nullptr || simpleArgs[0] == nullptr)
     {
         clear();
-        exit(1);
+        return;
     }
 
-    print();    
+    if (_numberOfSimpleCommands ==1 && strcmp(simpleArgs[0],"exit")==0)
+    {
+        printf("Exiting myshell...\n");
+        fflush(stdout);
+        clear();
+        exit(0);
+    }
+
+    if (_numberOfSimpleCommands ==1 && strcmp(simpleArgs[0],"cd")==0 && !_background) 
+    {
+        char *directory = simpleArgs[1];
+        if (directory == nullptr) 
+        {
+            directory = getenv("HOME");
+        }
+        if (directory == nullptr || chdir(directory) <0)
+        {
+            perror("Error: cd failed");
+        }
+        clear();
+        return;
+    }
 
     int defaultInput = dup(0);
     int defaultOutput = dup(1);
     int defaultError = dup(2);
 
-    int fdin;
-    int fdout;
-    int fderr;
-
     if (defaultInput <0 || defaultOutput <0 || defaultError <0)
     {
         perror("Error: dup failed");
+        if (defaultInput >= 0) 
+        {
+            close(defaultInput);
+        }
+        if (defaultOutput >= 0) 
+        {
+            close(defaultOutput);
+        }
+        if (defaultError >= 0) 
+        {
+            close(defaultError);
+        }
         clear();
         return;
     }
 
-    if (_inputFile)
+    //CTRL+C:
+    struct sigaction defaultInt;
+    memset(&defaultInt, 0, sizeof(defaultInt));
+    defaultInt.sa_handler = SIG_DFL;
+    sigemptyset(&defaultInt.sa_mask);
+
+    int prev=-1;
+    std::vector<pid_t> childPids;
+    bool forkfail=false;
+
+    for (int i = 0; i < _numberOfSimpleCommands; i++)
     {
-        fdin = open(_inputFile, O_RDONLY);
+        int pipefd[2]={-1,-1};
+        if (i < _numberOfSimpleCommands - 1)
+        {
+            if (pipe(pipefd) < 0)
+            {
+                perror("Error: pipe failed");
+                forkfail=true;
+                break;
+            }
+        }
+
+        pid_t pid = fork();
+        if (pid < 0)
+        {
+            perror("Error: fork failed");
+            forkfail=true;
+
+            if (pipefd[0] != -1)
+            {
+                close(pipefd[0]);
+            }
+            if (pipefd[1] != -1)
+            {
+                close(pipefd[1]);
+            }
+            break;
+        }
+
+        else if (pid == 0) // Child process
+        {
+            sigaction(SIGINT, &defaultInt, nullptr);
+            
+            //Connect input to the previous command's pipe
+            if (prev != -1)
+            {
+                if(dup2(prev, 0) < 0)
+                {
+                    perror("Error: dup2 failed");
+                    _exit(EXIT_FAILURE);
+                }
+            }
+
+            //Connect output to the next command's pipe
+            if (pipefd[1] != -1)
+            {
+                if(dup2(pipefd[1], 1) < 0)
+                {
+                    perror("Error: dup2 failed");
+                    _exit(EXIT_FAILURE);
+                }
+            }
+
+            if (prev != -1)
+            {
+                close(prev);
+            }
+
+            if (pipefd[0] != -1)
+            {
+                close(pipefd[0]);
+            }
+
+            if (pipefd[1] != -1)
+            {
+                close(pipefd[1]);
+            }
+
+            //Input redirection:
+            if (i==0 && _inputFile != nullptr)
+            {
+                int inputFd = open(_inputFile, O_RDONLY);
+                if (inputFd < 0)
+                {
+                    perror("Error: failed to open input file");
+                    _exit(EXIT_FAILURE);
+                }
+                if (dup2(inputFd, 0) < 0)
+                {
+                    perror("Error: dup2 failed for input redirection");
+                    close(inputFd);
+                    _exit(EXIT_FAILURE);
+                }
+                close(inputFd);
+            }
+
+            //Output redirection: command > output.txt
+            //Append redirection: command >> output.txt
+
+            if (i==_numberOfSimpleCommands -1 && _outFile != nullptr)
+            {
+                if (_append)
+                {
+                    int outputFd = open(_outFile, O_WRONLY | O_CREAT | O_APPEND, 0644);
+                    if (outputFd < 0)
+                    {
+                        perror("Error: failed to open output file");
+                        _exit(EXIT_FAILURE);
+                    }
+
+                    if (dup2(outputFd, STDOUT_FILENO) < 0)
+                    {
+                        perror("Error: dup2 failed for output redirection");
+                        close(outputFd);
+                        _exit(EXIT_FAILURE);
+                    }
+                    close(outputFd);
+                }
+
+                //Error redirection: command 2> error.txt
+                if (i== _numberOfSimpleCommands -1 && _errFile != nullptr)
+                {
+                    int errorFd = open(_errFile, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+                    if (errorFd < 0)
+                    {
+                        perror("Error: failed to open error file");
+                        _exit(EXIT_FAILURE);
+                    }
+                    if (dup2(errorFd, STDERR_FILENO) < 0)
+                    {
+                        perror("Error: dup2 failed for error redirection");
+                        close(errorFd);
+                        _exit(EXIT_FAILURE);
+                    }
+                    close(errorFd);
+                }
+
+                close(defaultInput);
+                close(defaultOutput);
+                close(defaultError);
+
+                SimpleCommand *cmd = _simpleCommands[i];
+                if (cmd == nullptr || cmd->_arguments == nullptr || cmd->_arguments[0] == nullptr)
+                {
+                    std::cerr << "Error: invalid command\n";
+                    _exit(EXIT_FAILURE);
+                }
+            execvp(_simpleCommands[i]->_arguments[0], _simpleCommands[i]->_arguments);
+            perror("Error: execvp failed");
+            exit(EXIT_FAILURE);
+        }
+
+        else // Parent process
+        {
+            childPids.push_back(pid);
+
+            //Parent doesn't need these ends of the pipes, close them
+            if (prev != -1)
+            {
+                close(prev);
+            }
+            if (pipefd[1] != -1)
+            {
+                close(pipefd[1]);
+            }
+
+            //Keep the read end of the pipe for the next command
+            prev = pipefd[0];
+        }
     }
-    else
+
+    //Close the final pipe read
+    if (prev != -1)
     {
-        fdin=dup(defaultInput);
+        close(prev);
     }
 
-    if (_outFile)
+    //Restore shell's original descriptors
+    if (dup2(defaultInput, 0)<0)
     {
-        if (_append)
-        {
-            fdout = open(_outFile, O_WRONLY | O_CREAT | O_APPEND, 0644);
-        }
-        else
-        {
-            fdout = open(_outFile, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-        }
+        perror("Error: dup2 failed");
     }
-    else {
-        fdout=dup(defaultOutput);
-    }
-
-    if (_errFile)
+    if (dup2(defaultOutput, 1)<0)
     {
-        if (_append)
-        {
-            fderr = open(_errFile, O_WRONLY | O_CREAT | O_APPEND, 0644);
-        }
-        else
-        {
-            fderr = open(_errFile, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-        }
+        perror("Error: dup2 failed");
     }
-    else {
-        fderr=dup(defaultError);
-    }
-
-    dup2(fdin, 0);
-    dup2(fdout, 1);
-    dup2(fderr, 2);
-
-
-    pid_t pid = fork();
-    if (pid < 0)
+    if (dup2(defaultError, 2)<0)
     {
-        perror("Error: fork failed");
-        clear();
-        exit(EXIT_FAILURE);
+        perror("Error: dup2 failed");
     }
-    else if (pid == 0) // Child process
-    {
-        if (_inputFile != nullptr)
-        {
-            int inputFd = open(_inputFile, O_RDONLY);
-            if (inputFd < 0)
-            {
-                perror("Error: failed to open input file");
-                exit(EXIT_FAILURE);
-            }
-            if (dup2(inputFd, STDIN_FILENO) < 0)
-            {
-                perror("Error: dup2 failed for input redirection");
-                exit(EXIT_FAILURE);
-            }
-            close(inputFd);
-        }
-
-        if (_outFile != nullptr)
-        {
-            int outputFd;
-            if (_append)
-            {
-                outputFd = open(_outFile, O_WRONLY | O_CREAT | O_APPEND, 0644);
-            }
-            else
-            {
-                outputFd = open(_outFile, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-            }
-            if (outputFd < 0)
-            {
-                perror("Error: failed to open output file");
-                exit(EXIT_FAILURE);
-            }
-            if (dup2(outputFd, STDOUT_FILENO) < 0)
-            {
-                perror("Error: dup2 failed for output redirection");
-                exit(EXIT_FAILURE);
-            }
-            close(outputFd);
-        }
-
-        if (_errFile != nullptr)
-        {
-            int errorFd;
-            if (_append)
-            {
-                errorFd = open(_errFile, O_WRONLY | O_CREAT | O_APPEND, 0644);
-            }
-            else
-            {
-                errorFd = open(_errFile, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-            }
-            if (errorFd < 0)
-            {
-                perror("Error: failed to open error file");
-                exit(EXIT_FAILURE);
-            }
-            if (dup2(errorFd, STDERR_FILENO) < 0)
-            {
-                perror("Error: dup2 failed for error redirection");
-                exit(EXIT_FAILURE);
-            }
-            close(errorFd);
-        }
-
-        execvp(_simpleCommands[0]->_arguments[0], _simpleCommands[0]->_arguments);
-        perror("Error: execvp failed");
-        exit(EXIT_FAILURE);
-    }
-    else // Parent process
-    {
-        if (!_background)
-        {
-            waitpid(pid, NULL, 0);
-        }
-    }
-
-    dup2(defaultInput, 0);
-    dup2(defaultOutput, 1);
-    dup2(defaultError, 2);
 
     close(defaultInput);
     close(defaultOutput);
     close(defaultError);
+
+    //wait for foreground processes to finish
+    if (!_background)
+    {
+        for (pid_t childPid : childPids)
+        {
+            while (waitpid(childPid, NULL, 0) < 0)
+            {
+                // Wait for all child processes to finish
+                break;
+            }
+        }
+    }
 
     clear();
 }
