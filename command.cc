@@ -584,7 +584,7 @@ void Command::execute()
                 }
                 close(outputFd);
 
-                if (_out_error)
+                /*if (_out_error)
                 {
                     if (dup2(outputFd, STDERR_FILENO) < 0)
                     {
@@ -592,7 +592,7 @@ void Command::execute()
                         close(outputFd);
                         _exit(EXIT_FAILURE);
                     }
-                }
+                }*/
             }
 
              // For >>&, redirect stderr to the already redirected stdout.
@@ -686,10 +686,11 @@ void Command::execute()
                     continue;
                 }
 
-                if (errno != EINTR)
+                if (errno == ECHILD)
                 {
-                    perror("Error: waitpid failed");
+                    break;
                 }
+                perror("Error: waitpid failed");
                 break;
             }
         }
