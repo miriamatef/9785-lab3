@@ -27,6 +27,8 @@
 #include <sstream>
 #include "command.h"
 #include "tokenizer.h"
+#include <errno.h>
+
 
 
 void parse(std::vector<Token> &tokens)
@@ -102,7 +104,6 @@ void parse(std::vector<Token> &tokens)
             {
                 std::cerr << "Error: multiple output redirections\n";
                 delete currentSimpleCommand;
-                free(currentCommand._outFile);
                 currentCommand.clear();
                 return;
             }
@@ -157,7 +158,6 @@ void parse(std::vector<Token> &tokens)
             {
                 std::cerr << "Error: missing redirection filename\n";
                 delete currentSimpleCommand;
-                free(currentCommand._errFile);
                 currentCommand.clear();
                 return;
             }
@@ -165,7 +165,6 @@ void parse(std::vector<Token> &tokens)
             {
                 std::cerr << "Error: multiple error redirections\n";
                 delete currentSimpleCommand;
-                free(currentCommand._errFile);
                 currentCommand.clear();
                 return;
             }
@@ -185,17 +184,13 @@ void parse(std::vector<Token> &tokens)
             {
                 std::cerr << "Error: missing redirection filename\n";
                 delete currentSimpleCommand;
-                free(currentCommand._errFile);
-                free(currentCommand._outFile);
                 currentCommand.clear();
                 return;
             }
             if (currentCommand._out_error == 1)
             {
                 std::cerr << "Error: multiple error redirections\n";
-                free(currentSimpleCommand);
-                free(currentCommand._errFile);
-                free(currentCommand._outFile);
+                delete currentSimpleCommand;
                 currentCommand.clear();
                 return;
             }
@@ -218,9 +213,6 @@ void parse(std::vector<Token> &tokens)
             {
                 std::cerr << "Error: missing command after pipe\n";
                 delete currentSimpleCommand;
-                free(currentCommand._outFile);
-                free(currentCommand._inputFile);
-                free(currentCommand._errFile);
                 currentCommand.clear();
                 return;
             }
@@ -228,9 +220,13 @@ void parse(std::vector<Token> &tokens)
             {
                 std::cerr << "Error: missing command before pipe\n";
                 delete currentSimpleCommand;
-                free(currentCommand._outFile);
-                free(currentCommand._inputFile);
-                free(currentCommand._errFile);
+                currentCommand.clear();
+                return;
+            }
+            if (currentCommand._outFile != nullptr)
+            {
+                std::cerr << "Error: output redirection is only allowed on the last command\n";
+                delete currentSimpleCommand;
                 currentCommand.clear();
                 return;
             }
@@ -243,9 +239,6 @@ void parse(std::vector<Token> &tokens)
             {
                 std::cerr << "Error: background operator '&' must be at the end of the command\n";
                 delete currentSimpleCommand;
-                free(currentCommand._outFile);
-                free(currentCommand._inputFile);
-                free(currentCommand._errFile);
                 currentCommand.clear();
                 return;
             }
@@ -253,9 +246,6 @@ void parse(std::vector<Token> &tokens)
             {
                 std::cerr << "Error: missing command before background operator '&'\n";
                 delete currentSimpleCommand;
-                free(currentCommand._outFile);
-                free(currentCommand._inputFile);
-                free(currentCommand._errFile);
                 currentCommand.clear();
                 return;
             }
@@ -265,9 +255,6 @@ void parse(std::vector<Token> &tokens)
         default:
             std::cerr << "Error: unexpected token type\n";
             delete currentSimpleCommand;
-            free(currentCommand._outFile);
-            free(currentCommand._inputFile);
-            free(currentCommand._errFile);
             currentCommand.clear();
             return;
         }
@@ -281,7 +268,6 @@ void parse(std::vector<Token> &tokens)
     else
     {
         delete currentSimpleCommand;
-        free(currentCommand);
         currentSimpleCommand = nullptr; // Prevent double deletion
     }
 
@@ -295,7 +281,6 @@ void parse(std::vector<Token> &tokens)
     currentCommand.execute();
     
 }
-
 SimpleCommand::SimpleCommand()
 {
     _numberOfAvailableArguments = 5;
@@ -428,7 +413,7 @@ void Command::execute()
 
     if (_numberOfSimpleCommands ==1 && strcmp(simpleArgs[0],"exit")==0)
     {
-        printf("Exiting myshell...\n");
+        printf("Good bye!!\n");
         fflush(stdout);
         clear();
         exit(0);
@@ -480,17 +465,20 @@ void Command::execute()
 
     int prev=-1;
     std::vector<pid_t> childPids;
-    bool forkfail=false;
 
     for (int i = 0; i < _numberOfSimpleCommands; i++)
     {
+        if (_simpleCommands[i] == nullptr || _simpleCommands[i]->_arguments == nullptr || _simpleCommands[i]->_arguments[0] == nullptr || _simpleCommands[i]->_numberOfArguments == 0)
+        {
+            std::cerr << "Error: invalid command\n";
+            break;
+        }
         int pipefd[2]={-1,-1};
         if (i < _numberOfSimpleCommands - 1)
         {
             if (pipe(pipefd) < 0)
             {
                 perror("Error: pipe failed");
-                forkfail=true;
                 break;
             }
         }
@@ -499,8 +487,6 @@ void Command::execute()
         if (pid < 0)
         {
             perror("Error: fork failed");
-            forkfail=true;
-
             if (pipefd[0] != -1)
             {
                 close(pipefd[0]);
@@ -515,6 +501,7 @@ void Command::execute()
         else if (pid == 0) // Child process
         {
             sigaction(SIGINT, &defaultInt, nullptr);
+            signal (SIGCHLD, SIG_DFL);
             
             //Connect input to the previous command's pipe
             if (prev != -1)
@@ -571,58 +558,77 @@ void Command::execute()
 
             //Output redirection: command > output.txt
             //Append redirection: command >> output.txt
-
             if (i==_numberOfSimpleCommands -1 && _outFile != nullptr)
             {
+                int flags = O_WRONLY | O_CREAT;
                 if (_append)
                 {
-                    int outputFd = open(_outFile, O_WRONLY | O_CREAT | O_APPEND, 0644);
-                    if (outputFd < 0)
-                    {
-                        perror("Error: failed to open output file");
-                        _exit(EXIT_FAILURE);
-                    }
+                    flags |= O_APPEND;
+                }
+                else
+                {
+                    flags |= O_TRUNC;
+                }
 
-                    if (dup2(outputFd, STDOUT_FILENO) < 0)
+                int outputFd = open(_outFile, flags, 0644);
+                if (outputFd < 0)
+                {
+                    perror("Error: failed to open output file");
+                    _exit(EXIT_FAILURE);
+                }
+                if (dup2(outputFd, STDOUT_FILENO) < 0)
+                {
+                    perror("Error: dup2 failed for output redirection");
+                    close(outputFd);
+                    _exit(EXIT_FAILURE);
+                }
+                close(outputFd);
+
+                if (_out_error)
+                {
+                    if (dup2(outputFd, STDERR_FILENO) < 0)
                     {
-                        perror("Error: dup2 failed for output redirection");
+                        perror("Error: dup2 failed for combined output/error redirection");
                         close(outputFd);
                         _exit(EXIT_FAILURE);
                     }
-                    close(outputFd);
                 }
+            }
 
-                //Error redirection: command 2> error.txt
-                if (i== _numberOfSimpleCommands -1 && _errFile != nullptr)
+             // For >>&, redirect stderr to the already redirected stdout.
+            if (i == _numberOfSimpleCommands - 1 && _out_error)
+            {
+                if (dup2(STDOUT_FILENO, STDERR_FILENO) < 0)
                 {
-                    int errorFd = open(_errFile, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-                    if (errorFd < 0)
-                    {
-                        perror("Error: failed to open error file");
-                        _exit(EXIT_FAILURE);
-                    }
-                    if (dup2(errorFd, STDERR_FILENO) < 0)
-                    {
-                        perror("Error: dup2 failed for error redirection");
-                        close(errorFd);
-                        _exit(EXIT_FAILURE);
-                    }
-                    close(errorFd);
+                    perror("dup2 combined output/error");
+                    _exit(1);
                 }
+            }
 
-                close(defaultInput);
-                close(defaultOutput);
-                close(defaultError);
-
-                SimpleCommand *cmd = _simpleCommands[i];
-                if (cmd == nullptr || cmd->_arguments == nullptr || cmd->_arguments[0] == nullptr)
+            //Error redirection: command 2> error.txt
+            if (i== _numberOfSimpleCommands -1 && _errFile != nullptr && !_out_error)
+            {
+                int errorFd = open(_errFile, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+                if (errorFd < 0)
                 {
-                    std::cerr << "Error: invalid command\n";
+                    perror("Error: failed to open error file");
                     _exit(EXIT_FAILURE);
                 }
+                if (dup2(errorFd, STDERR_FILENO) < 0)
+                {
+                    perror("Error: dup2 failed for error redirection");
+                    close(errorFd);
+                    _exit(EXIT_FAILURE);
+                }
+                close(errorFd);
+            }   
+            close(defaultInput);
+            close(defaultOutput);
+            close(defaultError);
+
             execvp(_simpleCommands[i]->_arguments[0], _simpleCommands[i]->_arguments);
             perror("Error: execvp failed");
-            exit(EXIT_FAILURE);
+            _exit(EXIT_FAILURE);
         }
 
         else // Parent process
@@ -675,7 +681,15 @@ void Command::execute()
         {
             while (waitpid(childPid, NULL, 0) < 0)
             {
-                // Wait for all child processes to finish
+                if (errno == EINTR)
+                {
+                    continue;
+                }
+
+                if (errno != EINTR)
+                {
+                    perror("Error: waitpid failed");
+                }
                 break;
             }
         }
@@ -702,11 +716,60 @@ void Command::prompt() //modification: stop reading when EOF is reached
     }
 }
 
+void childTerminated(int signalNumber)
+{
+    (void)signalNumber;
+
+    int savedErrno = errno;
+    int status;
+    pid_t pid;
+
+    // Reap all terminated child processes.
+    while ((pid = waitpid(-1, &status, WNOHANG)) > 0)
+    {
+        int logFd = open("myshell.log",
+                         O_WRONLY | O_CREAT | O_APPEND,
+                         0644);
+
+        if (logFd >= 0)
+        {
+            char message[100];
+
+            int length = snprintf(
+                message,
+                sizeof(message),
+                "Child process %ld terminated\n",
+                (long)pid
+            );
+
+            if (length > 0 && length < (int)sizeof(message))
+            {
+                write(logFd, message, length);
+            }
+
+            close(logFd);
+        }
+    }
+
+    errno = savedErrno;
+}
+
 Command Command::_currentCommand;
 SimpleCommand *Command::_currentSimpleCommand;
 
 int main()
 {
+    signal (SIGINT, SIG_IGN); // Ignore SIGINT in the shell
+    struct sigaction childAction;
+    childAction.sa_handler = childTerminated;
+    sigemptyset(&childAction.sa_mask);
+    childAction.sa_flags = SA_RESTART | SA_NOCLDSTOP;
+
+    if (sigaction(SIGCHLD, &childAction, NULL) == -1)
+    {
+        perror("sigaction SIGCHLD");
+        return 1;
+    }
     Command::_currentCommand.prompt();
     return 0;
 }
