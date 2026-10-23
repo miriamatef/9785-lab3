@@ -38,7 +38,7 @@ void parse(std::vector<Token> &tokens)
 
     //currentCommand.execute();
 
-    for (int i = 0; i < tokens.size(); i++)
+    for (size_t int i = 0; i < tokens.size(); i++)
     {
         const Token &token = tokens[i];
         
