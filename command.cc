@@ -331,7 +331,7 @@ void Command::clear()
         }
 
         free(_simpleCommands[i]->_arguments);
-        delete(_simpleCommands[i]);//CHECKKKKK THIIISSSSSSS
+        free(_simpleCommands[i]);
     }
 
     if (_outFile)
@@ -386,11 +386,29 @@ void Command::print()
 
 void Command::execute()
 {
-    print();
+    //print();
 
-    int defaultInput = dup(STDIN_FILENO);
-    int defaultOutput = dup(STDOUT_FILENO);
-    int defaultError = dup(STDERR_FILENO);
+    if (_numberOfSimpleCommands == 0)
+    {
+        clear();
+        return;
+    }
+
+    if(strcmp(_simpleCommands[0]->_arguments[0], "exit") == 0)
+    {
+        clear();
+        exit(1);
+    }
+
+    print();    
+
+    int defaultInput = dup(0);
+    int defaultOutput = dup(1);
+    int defaultError = dup(2);
+
+    int fdin;
+    int fdout;
+    int fderr;
 
     if (defaultInput <0 || defaultOutput <0 || defaultError <0)
     {
@@ -399,16 +417,123 @@ void Command::execute()
         return;
     }
 
+    if (_inputFile)
+    {
+        fdin = open(_inputFile, O_RDONLY);
+    }
+    else
+    {
+        fdin=dup(defaultInput);
+    }
+
+    if (_outFile)
+    {
+        if (_append)
+        {
+            fdout = open(_outFile, O_WRONLY | O_CREAT | O_APPEND, 0644);
+        }
+        else
+        {
+            fdout = open(_outFile, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        }
+    }
+    else {
+        fdout=dup(defaultOutput);
+    }
+
+    if (_errFile)
+    {
+        if (_append)
+        {
+            fderr = open(_errFile, O_WRONLY | O_CREAT | O_APPEND, 0644);
+        }
+        else
+        {
+            fderr = open(_errFile, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        }
+    }
+    else {
+        fderr=dup(defaultError);
+    }
+
+    dup2(fdin, 0);
+    dup2(fdout, 1);
+    dup2(fderr, 2);
+
+
     pid_t pid = fork();
     if (pid < 0)
     {
-        std::cerr << "Error: fork failed\n";
+        perror("Error: fork failed");
         clear();
-        prompt();
-        return;
+        exit(EXIT_FAILURE);
     }
     else if (pid == 0) // Child process
     {
+        if (_inputFile != nullptr)
+        {
+            int inputFd = open(_inputFile, O_RDONLY);
+            if (inputFd < 0)
+            {
+                perror("Error: failed to open input file");
+                exit(EXIT_FAILURE);
+            }
+            if (dup2(inputFd, STDIN_FILENO) < 0)
+            {
+                perror("Error: dup2 failed for input redirection");
+                exit(EXIT_FAILURE);
+            }
+            close(inputFd);
+        }
+
+        if (_outFile != nullptr)
+        {
+            int outputFd;
+            if (_append)
+            {
+                outputFd = open(_outFile, O_WRONLY | O_CREAT | O_APPEND, 0644);
+            }
+            else
+            {
+                outputFd = open(_outFile, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            }
+            if (outputFd < 0)
+            {
+                perror("Error: failed to open output file");
+                exit(EXIT_FAILURE);
+            }
+            if (dup2(outputFd, STDOUT_FILENO) < 0)
+            {
+                perror("Error: dup2 failed for output redirection");
+                exit(EXIT_FAILURE);
+            }
+            close(outputFd);
+        }
+
+        if (_errFile != nullptr)
+        {
+            int errorFd;
+            if (_append)
+            {
+                errorFd = open(_errFile, O_WRONLY | O_CREAT | O_APPEND, 0644);
+            }
+            else
+            {
+                errorFd = open(_errFile, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            }
+            if (errorFd < 0)
+            {
+                perror("Error: failed to open error file");
+                exit(EXIT_FAILURE);
+            }
+            if (dup2(errorFd, STDERR_FILENO) < 0)
+            {
+                perror("Error: dup2 failed for error redirection");
+                exit(EXIT_FAILURE);
+            }
+            close(errorFd);
+        }
+
         execvp(_simpleCommands[0]->_arguments[0], _simpleCommands[0]->_arguments);
         perror("Error: execvp failed");
         exit(EXIT_FAILURE);
@@ -421,16 +546,15 @@ void Command::execute()
         }
     }
 
-    dup2(defaultInput, STDIN_FILENO);
-    dup2(defaultOutput, STDOUT_FILENO);
-    dup2(defaultError, STDERR_FILENO);
+    dup2(defaultInput, 0);
+    dup2(defaultOutput, 1);
+    dup2(defaultError, 2);
 
     close(defaultInput);
     close(defaultOutput);
     close(defaultError);
 
     clear();
-    prompt();
 }
 
 void Command::prompt() //modification: stop reading when EOF is reached
