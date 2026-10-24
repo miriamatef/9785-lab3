@@ -47,6 +47,8 @@ void WildCards(SimpleCommand *simpleCommand, const std::string &arg)
     globfree(&matching);
 }
 
+//============================================================================================
+
 void parse(std::vector<Token> &tokens)
 {
     Command currentCommand;
@@ -300,6 +302,8 @@ void parse(std::vector<Token> &tokens)
     
 }
 
+//=================================================================================================================================================
+
 SimpleCommand::SimpleCommand()
 {
     _numberOfAvailableArguments = 5;
@@ -312,8 +316,7 @@ void SimpleCommand::insertArgument(char *argument)
     if (_numberOfAvailableArguments == _numberOfArguments + 1)
     {
         _numberOfAvailableArguments *= 2;
-        _arguments = (char **)realloc(_arguments,
-                                      _numberOfAvailableArguments * sizeof(char *));
+        _arguments = (char **)realloc(_arguments,_numberOfAvailableArguments * sizeof(char *));
     }
 
     _arguments[_numberOfArguments] = argument;
@@ -321,6 +324,8 @@ void SimpleCommand::insertArgument(char *argument)
 
     _numberOfArguments++;
 }
+
+//================================================================================================================
 
 Command::Command()
 {
@@ -413,23 +418,26 @@ void Command::print()
     printf("\n\n");
 }
 
+//===========================================================================================================================================================================
+
 void Command::execute()
 {
-    //print();
+    print();
 
-    if (_numberOfSimpleCommands == 0)
+    if (_numberOfSimpleCommands == 0) //checking for empty command
     {
         clear();
         return;
     }
 
-    char **simpleArgs = _simpleCommands[0]->_arguments;
+    char **simpleArgs = _simpleCommands[0]->_arguments; //get arguments fo the simple command
     if (simpleArgs ==nullptr || simpleArgs[0] == nullptr)
     {
         clear();
         return;
     }
 
+    //HANDLING THE EXIT:
     if (_numberOfSimpleCommands ==1 && strcmp(simpleArgs[0],"exit")==0)
     {
         printf("Good bye!!\n");
@@ -438,6 +446,7 @@ void Command::execute()
         exit(0);
     }
 
+    //cd IMPLEMENTATION:
     if (_numberOfSimpleCommands ==1 && strcmp(simpleArgs[0],"cd")==0 && !_background) 
     {
         char *directory = simpleArgs[1];
@@ -445,7 +454,7 @@ void Command::execute()
         {
             directory = getenv("HOME");
         }
-        if (directory == nullptr || chdir(directory) <0)
+        if (directory == nullptr || chdir(directory) ==-1)
         {
             perror("Error: cd failed");
         }
@@ -453,6 +462,14 @@ void Command::execute()
         return;
     }
 
+    //CTRL+C:
+    struct sigaction ctrlc;
+    memset(&ctrlc, 0, sizeof(ctrlc));
+    ctrlc.sa_handler = SIG_DFL;
+    //fel main() hakhaly el shell y-ignore SIGINT
+    sigemptyset(&ctrlc.sa_mask);
+
+    //file default descriptors: 
     int defaultInput = dup(0);
     int defaultOutput = dup(1);
     int defaultError = dup(2);
@@ -461,27 +478,19 @@ void Command::execute()
     {
         perror("Error: dup failed");
         if (defaultInput >= 0) 
-        {
             close(defaultInput);
-        }
+
         if (defaultOutput >= 0) 
-        {
             close(defaultOutput);
-        }
+
         if (defaultError >= 0) 
-        {
             close(defaultError);
-        }
+        
         clear();
         return;
     }
 
-    //CTRL+C:
-    struct sigaction defaultInt;
-    memset(&defaultInt, 0, sizeof(defaultInt));
-    defaultInt.sa_handler = SIG_DFL;
-    sigemptyset(&defaultInt.sa_mask);
-
+    //child and parent
     int prev=-1;
     std::vector<pid_t> childPids;
 
@@ -492,10 +501,12 @@ void Command::execute()
             std::cerr << "Error: invalid command\n";
             break;
         }
-        int pipefd[2]={-1,-1};
+
+        //PIPE
+        int pipe_file[2]={-1,-1}; //[0]=read, [1]=write
         if (i < _numberOfSimpleCommands - 1)
         {
-            if (pipe(pipefd) < 0)
+            if (pipe(pipe_file) < 0)
             {
                 perror("Error: pipe failed");
                 break;
@@ -506,26 +517,26 @@ void Command::execute()
         if (pid < 0)
         {
             perror("Error: fork failed");
-            if (pipefd[0] != -1)
+            if (pipe_file[0] != -1)
             {
-                close(pipefd[0]);
+                close(pipe_file[0]);
             }
-            if (pipefd[1] != -1)
+            if (pipe_file[1] != -1)
             {
-                close(pipefd[1]);
+                close(pipe_file[1]);
             }
             break;
         }
 
         else if (pid == 0) // Child process
         {
-            sigaction(SIGINT, &defaultInt, nullptr);
+            sigaction(SIGINT, &ctrlc, nullptr);
             signal (SIGCHLD, SIG_DFL);
             
             //Connect input to the previous command's pipe
             if (prev != -1)
             {
-                if(dup2(prev, 0) < 0)
+                if(dup2(prev, 0) < 0) //hayethat fel stdin (0)
                 {
                     perror("Error: dup2 failed");
                     _exit(EXIT_FAILURE);
@@ -533,9 +544,9 @@ void Command::execute()
             }
 
             //Connect output to the next command's pipe
-            if (pipefd[1] != -1)
+            if (pipe_file[1] != -1)
             {
-                if(dup2(pipefd[1], 1) < 0)
+                if(dup2(pipe_file[1], 1) < 0) //hayethat fel stdout (1)
                 {
                     perror("Error: dup2 failed");
                     _exit(EXIT_FAILURE);
@@ -547,46 +558,45 @@ void Command::execute()
                 close(prev);
             }
 
-            if (pipefd[0] != -1)
+            if (pipe_file[0] != -1)
             {
-                close(pipefd[0]);
+                close(pipe_file[0]);
             }
 
-            if (pipefd[1] != -1)
+            if (pipe_file[1] != -1)
             {
-                close(pipefd[1]);
+                close(pipe_file[1]);
             }
 
             //Input redirection:
             if (i==0 && _inputFile != nullptr)
             {
-                int inputFd = open(_inputFile, O_RDONLY);
-                if (inputFd < 0)
+                int inputFileDir = open(_inputFile, O_RDONLY);
+                if (inputFileDir < 0)
                 {
                     perror("Error: failed to open input file");
                     _exit(EXIT_FAILURE);
                 }
-                if (dup2(inputFd, 0) < 0)
+                if (dup2(inputFileDir, 0) < 0) //put the input file instead of stdin (0)
                 {
                     perror("Error: dup2 failed for input redirection");
-                    close(inputFd);
+                    close(inputFileDir);
                     _exit(EXIT_FAILURE);
                 }
-                close(inputFd);
+                close(inputFileDir);
             }
 
-            //Output redirection: command > output.txt
-            //Append redirection: command >> output.txt
+            //Output and append redirections:
             if (i==_numberOfSimpleCommands -1 && _outFile != nullptr)
             {
                 int flags = O_WRONLY | O_CREAT;
                 if (_append)
                 {
-                    flags |= O_APPEND;
+                    flags |= O_APPEND; //adds to the end of the file
                 }
                 else
                 {
-                    flags |= O_TRUNC;
+                    flags |= O_TRUNC; //overwrites 
                 }
 
                 int outputFd = open(_outFile, flags, 0644);
@@ -595,36 +605,26 @@ void Command::execute()
                     perror("Error: failed to open output file");
                     _exit(EXIT_FAILURE);
                 }
-                if (dup2(outputFd, STDOUT_FILENO) < 0)
+                if (dup2(outputFd, 1) < 0)
                 {
                     perror("Error: dup2 failed for output redirection");
                     close(outputFd);
                     _exit(EXIT_FAILURE);
                 }
                 close(outputFd);
-
-                /*if (_out_error)
-                {
-                    if (dup2(outputFd, STDERR_FILENO) < 0)
-                    {
-                        perror("Error: dup2 failed for combined output/error redirection");
-                        close(outputFd);
-                        _exit(EXIT_FAILURE);
-                    }
-                }*/
             }
 
-             // For >>&, redirect stderr to the already redirected stdout.
+            //duplicating teh std o/p to the std error
             if (i == _numberOfSimpleCommands - 1 && _out_error)
             {
-                if (dup2(STDOUT_FILENO, STDERR_FILENO) < 0)
+                if (dup2(1, 2) < 0)
                 {
                     perror("dup2 combined output/error");
                     _exit(1);
                 }
             }
 
-            //Error redirection: command 2> error.txt
+            //Error redirection: 
             if (i== _numberOfSimpleCommands -1 && _errFile != nullptr && !_out_error)
             {
                 int errorFd = open(_errFile, O_WRONLY | O_CREAT | O_TRUNC, 0644);
@@ -633,7 +633,7 @@ void Command::execute()
                     perror("Error: failed to open error file");
                     _exit(EXIT_FAILURE);
                 }
-                if (dup2(errorFd, STDERR_FILENO) < 0)
+                if (dup2(errorFd, 2) < 0)
                 {
                     perror("Error: dup2 failed for error redirection");
                     close(errorFd);
@@ -654,18 +654,18 @@ void Command::execute()
         {
             childPids.push_back(pid);
 
-            //Parent doesn't need these ends of the pipes, close them
+            //since parent doesn't need the pipe descriptors, close them
             if (prev != -1)
             {
                 close(prev);
             }
-            if (pipefd[1] != -1)
+            if (pipe_file[1] != -1)
             {
-                close(pipefd[1]);
+                close(pipe_file[1]);
             }
 
             //Keep the read end of the pipe for the next command
-            prev = pipefd[0];
+            prev = pipe_file[0];
         }
     }
 
@@ -726,7 +726,7 @@ void Command::prompt() //modification: stop reading when EOF is reached
     {
         printf("myshell>");
         fflush(stdout);
-        std::getline(std::cin, input); 
+        std::getline(std::cin, input);  //Reads an entire line from standard input into input.
         if (std::cin.eof()) {
             printf("\n");
             break;
@@ -747,20 +747,13 @@ void childTerminated(int signalNumber)
     // Reap all terminated child processes.
     while ((pid = waitpid(-1, &status, WNOHANG)) > 0)
     {
-        int logFd = open("myshell.log",
-                         O_WRONLY | O_CREAT | O_APPEND,
-                         0644);
+        int logFd = open("myshell.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
 
         if (logFd >= 0)
         {
             char message[100];
 
-            int length = snprintf(
-                message,
-                sizeof(message),
-                "Child process %ld terminated\n",
-                (long)pid
-            );
+            int length = snprintf(message,sizeof(message),"Child process %ld terminated\n",(long)pid);
 
             if (length > 0 && length < (int)sizeof(message))
             {
@@ -780,16 +773,23 @@ SimpleCommand *Command::_currentSimpleCommand;
 int main()
 {
     signal (SIGINT, SIG_IGN); // Ignore SIGINT in the shell
+
+    //Preparing the SIGCHILD handler:
     struct sigaction childAction;
     childAction.sa_handler = childTerminated;
     sigemptyset(&childAction.sa_mask);
     childAction.sa_flags = SA_RESTART | SA_NOCLDSTOP;
+//SA_RESTART: requests auto restarting
+//SA_NOCLDSTOP:prevents the handler from being invoked because the child stopped
+
 
     if (sigaction(SIGCHLD, &childAction, NULL) == -1)
     {
         perror("sigaction SIGCHLD");
         return 1;
     }
+
+    //STARTTTTT:
     Command::_currentCommand.prompt();
     return 0;
 }
