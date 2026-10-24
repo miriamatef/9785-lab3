@@ -29,7 +29,23 @@
 #include "tokenizer.h"
 #include <errno.h>
 
-
+void WildCards(SimpleCommand *simpleCommand, const std::string &arg)
+{
+    glob_t matching= {};
+    int flags = glob (arg.c_str(), GLOB_NOCHECK, nullptr, &matching);
+    if (flags == 0)
+    {
+        for (size_t i = 0; i < matching.gl_pathc; ++i)
+        {
+            simpleCommand->insertArgument(strdup(matching.gl_pathv[i]));
+        }
+    }
+    else //if expansion fails, save the original argument
+    {
+        simpleCommand->insertArgument(strdup(arg.c_str()));
+    }
+    globfree(&matching);
+}
 
 void parse(std::vector<Token> &tokens)
 {
@@ -50,11 +66,13 @@ void parse(std::vector<Token> &tokens)
         switch (token.type)
         {
         case TOKEN_COMMAND:
-            currentSimpleCommand->insertArgument(strdup(token.value.c_str()));
+            WildCards(currentSimpleCommand, token.value);
+            //currentSimpleCommand->insertArgument(strdup(token.value.c_str()));
             break;
 
         case TOKEN_ARGUMENT:
-            currentSimpleCommand->insertArgument(strdup(token.value.c_str()));
+            WildCards (currentSimpleCommand, token.value);
+            //currentSimpleCommand->insertArgument(strdup(token.value.c_str()));
             break;
 
         case TOKEN_REDIRECT:
@@ -281,6 +299,7 @@ void parse(std::vector<Token> &tokens)
     currentCommand.execute();
     
 }
+
 SimpleCommand::SimpleCommand()
 {
     _numberOfAvailableArguments = 5;
